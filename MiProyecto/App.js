@@ -1,5 +1,5 @@
 import { StatusBar } from 'expo-status-bar';
-import { useMemo, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import {
   Alert,
   FlatList,
@@ -11,279 +11,217 @@ import {
   TextInput,
   View,
   Image,
+  Linking,
 } from 'react-native';
+import * as FileSystem from 'expo-file-system';
 
-const starterFolders = [
+const STORAGE_FILE = `${FileSystem.documentDirectory}myvideos-data.json`;
+const PLACEHOLDER_COVER = 'https://i.imgur.com/FiQ7vZx.png';
+
+const defaultFolders = [
   { id: 'favourites', name: 'Favourites', cover: 'https://i.imgur.com/QM7Z7wA.png', videos: [] },
 ];
 
-const isValidYoutubeUrl = (url) => {
-  const pattern = /^(https?:\/\/)?(www\.)?(youtube\.com|youtu\.be)\/.+/i;
-  return pattern.test(url.trim());
-};
+const isValidYoutubeUrl = (url) => /^(https?:\/\/)?(www\.)?(youtube\.com|youtu\.be)\/.+/i.test(url.trim());
 
 const getYoutubeId = (url) => {
-  const trimmed = url.trim();
-  const short = trimmed.match(/youtu\.be\/([^?&/]+)/i);
+  const cleaned = url.trim();
+  const short = cleaned.match(/youtu\.be\/([^?&/]+)/i);
   if (short?.[1]) return short[1];
-
-  const long = trimmed.match(/[?&]v=([^?&/]+)/i);
+  const long = cleaned.match(/[?&]v=([^?&/]+)/i);
   if (long?.[1]) return long[1];
-
-  const embed = trimmed.match(/embed\/([^?&/]+)/i);
+  const embed = cleaned.match(/embed\/([^?&/]+)/i);
   return embed?.[1] || '';
 };
 
-const folderCountLabel = (count) => `${count} Video${count === 1 ? '' : 's'}`;
+const toCount = (n) => `${n} Video${n === 1 ? '' : 's'}`;
 
 export default function App() {
-  const [folders, setFolders] = useState(starterFolders);
-  const [selectedFolderId, setSelectedFolderId] = useState(null);
-  const [isAddModalVisible, setIsAddModalVisible] = useState(false);
-  const [isMoveModalVisible, setIsMoveModalVisible] = useState(false);
-  const [pendingMoveVideo, setPendingMoveVideo] = useState(null);
+  const [folders, setFolders] = useState(defaultFolders);
+  const [activeFolderId, setActiveFolderId] = useState(null);
+  const [addOpen, setAddOpen] = useState(false);
+  const [moveOpen, setMoveOpen] = useState(false);
+  const [videoToMove, setVideoToMove] = useState(null);
   const [urlInput, setUrlInput] = useState('');
   const [newFolderInput, setNewFolderInput] = useState('');
 
-  const selectedFolder = useMemo(
-    () => folders.find((folder) => folder.id === selectedFolderId) || null,
-    [folders, selectedFolderId]
-  );
+  useEffect(() => {
+    const loadData = async () => {
+      try {
+        const raw = await FileSystem.readAsStringAsync(STORAGE_FILE);
+        if (raw) {
+          const parsed = JSON.parse(raw);
+          if (Array.isArray(parsed) && parsed.length > 0) setFolders(parsed);
+        }
+      } catch (error) {
+        console.warn('Storage load error', error);
+      }
+    };
+    loadData();
+  }, []);
 
-  const openAddModal = () => {
-    setUrlInput('');
-    setNewFolderInput('');
-    setIsAddModalVisible(true);
-  };
+  useEffect(() => {
+FileSystem.writeAsStringAsync(STORAGE_FILE, JSON.stringify(folders)).catch(() => {});
+  }, [folders]);
+
+  const activeFolder = useMemo(() => folders.find((f) => f.id === activeFolderId) || null, [folders, activeFolderId]);
 
   const createFolder = () => {
-    const trimmed = newFolderInput.trim();
-    if (!trimmed) return;
-
-    if (folders.some((folder) => folder.name.toLowerCase() === trimmed.toLowerCase())) {
-      Alert.alert('Folder already exists', 'Choose a different name.');
+    const name = newFolderInput.trim();
+    if (!name) return;
+    if (folders.some((f) => f.name.toLowerCase() === name.toLowerCase())) {
+      Alert.alert('List already exists', 'Use a different name.');
       return;
     }
 
-    const newFolder = {
-      id: `folder-${Date.now()}`,
-      name: trimmed,
-      cover: 'https://i.imgur.com/FiQ7vZx.png',
-      videos: [],
-    };
-
-    setFolders((prev) => [...prev, newFolder]);
+    setFolders((prev) => [...prev, { id: `folder-${Date.now()}`, name, cover: PLACEHOLDER_COVER, videos: [] }]);
     setNewFolderInput('');
   };
 
-  const addVideoToFolder = (folderId) => {
+  const addVideo = (folderId) => {
     if (!isValidYoutubeUrl(urlInput)) {
-      Alert.alert('Invalid URL', 'Paste a valid YouTube URL.');
+      Alert.alert('The url is not valid', 'Paste a valid YouTube URL.');
       return;
     }
 
-    const id = getYoutubeId(urlInput);
-    const video = {
+    const youtubeId = getYoutubeId(urlInput);
+    const newVideo = {
       id: `video-${Date.now()}`,
       youtubeUrl: urlInput.trim(),
-      youtubeId: id,
-      title: id ? `YouTube video ${id}` : 'YouTube video',
-      thumbnail: id ? `https://img.youtube.com/vi/${id}/mqdefault.jpg` : 'https://i.imgur.com/FiQ7vZx.png',
+      youtubeId,
+      title: youtubeId ? `Video ${youtubeId}` : 'YouTube Video',
+      channel: 'YouTube',
       duration: '--:--',
+      thumbnail: youtubeId ? `https://img.youtube.com/vi/${youtubeId}/mqdefault.jpg` : PLACEHOLDER_COVER,
     };
 
-    setFolders((prev) =>
-      prev.map((folder) =>
-        folder.id === folderId ? { ...folder, videos: [...folder.videos, video] } : folder
-      )
-    );
-
-    setIsAddModalVisible(false);
+    setFolders((prev) => prev.map((f) => (f.id === folderId ? { ...f, videos: [...f.videos, newVideo] } : f)));
     setUrlInput('');
+    setAddOpen(false);
   };
 
   const deleteFolder = (folderId) => {
-    Alert.alert('Delete folder', 'Delete this folder and all videos inside?', [
+    Alert.alert('Delete list', 'Delete this list and all its videos?', [
       { text: 'Cancel', style: 'cancel' },
       {
         text: 'Delete',
         style: 'destructive',
         onPress: () => {
-          setFolders((prev) => prev.filter((folder) => folder.id !== folderId));
-          if (selectedFolderId === folderId) setSelectedFolderId(null);
+          setFolders((prev) => prev.filter((f) => f.id !== folderId));
+          if (activeFolderId === folderId) setActiveFolderId(null);
         },
       },
     ]);
   };
 
   const deleteVideo = (videoId) => {
-    setFolders((prev) =>
-      prev.map((folder) =>
-        folder.id === selectedFolderId
-          ? { ...folder, videos: folder.videos.filter((video) => video.id !== videoId) }
-          : folder
-      )
-    );
+    setFolders((prev) => prev.map((f) => (f.id === activeFolderId ? { ...f, videos: f.videos.filter((v) => v.id !== videoId) } : f)));
   };
 
   const moveVideo = (targetFolderId) => {
-    if (!pendingMoveVideo || !selectedFolderId || selectedFolderId === targetFolderId) {
-      setIsMoveModalVisible(false);
-      return;
-    }
+    if (!videoToMove || !activeFolderId) return;
 
     setFolders((prev) => {
-      const sourceFolder = prev.find((f) => f.id === selectedFolderId);
-      const videoToMove = sourceFolder?.videos.find((video) => video.id === pendingMoveVideo);
-      if (!videoToMove) return prev;
+      const source = prev.find((f) => f.id === activeFolderId);
+      const video = source?.videos.find((v) => v.id === videoToMove);
+      if (!video) return prev;
 
-      return prev.map((folder) => {
-        if (folder.id === selectedFolderId) {
-          return { ...folder, videos: folder.videos.filter((video) => video.id !== pendingMoveVideo) };
-        }
-        if (folder.id === targetFolderId) {
-          return { ...folder, videos: [...folder.videos, videoToMove] };
-        }
-        return folder;
+      return prev.map((f) => {
+        if (f.id === activeFolderId) return { ...f, videos: f.videos.filter((v) => v.id !== videoToMove) };
+        if (f.id === targetFolderId) return { ...f, videos: [...f.videos, video] };
+        return f;
       });
     });
 
-    setPendingMoveVideo(null);
-    setIsMoveModalVisible(false);
+    setMoveOpen(false);
+    setVideoToMove(null);
   };
-
-  const renderFolderCard = ({ item }) => (
-    <Pressable style={styles.folderCard} onPress={() => setSelectedFolderId(item.id)}>
-      <Image source={{ uri: item.cover }} style={styles.folderCover} />
-      <View style={styles.folderTextWrap}>
-        <Text style={styles.folderTitle}>{item.name}</Text>
-        <Text style={styles.folderSub}>{folderCountLabel(item.videos.length)}</Text>
-      </View>
-      <Pressable onPress={() => deleteFolder(item.id)} style={styles.smallIconBtn}>
-        <Text style={styles.smallIconText}>✕</Text>
-      </Pressable>
-    </Pressable>
-  );
-
-  const renderVideoRow = ({ item }) => (
-    <View style={styles.videoRow}>
-      <Image source={{ uri: item.thumbnail }} style={styles.videoThumb} />
-      <View style={styles.videoTextWrap}>
-        <Text numberOfLines={1} style={styles.videoTitle}>{item.title}</Text>
-        <Text style={styles.videoSub}>{item.duration}</Text>
-      </View>
-      <View style={styles.videoActions}>
-        <Pressable
-          style={styles.actionBtn}
-          onPress={() => {
-            setPendingMoveVideo(item.id);
-            setIsMoveModalVisible(true);
-          }}
-        >
-          <Text style={styles.actionText}>⇄</Text>
-        </Pressable>
-        <Pressable style={styles.actionBtn} onPress={() => deleteVideo(item.id)}>
-          <Text style={styles.actionText}>🗑</Text>
-        </Pressable>
-      </View>
-    </View>
-  );
 
   return (
     <SafeAreaView style={styles.container}>
       <StatusBar style="light" />
-
-      {!selectedFolder ? (
+      {!activeFolder ? (
         <>
-          <View style={styles.headerRow}>
-            <Text style={styles.header}>MyVideos</Text>
-            <Pressable style={styles.addBtn} onPress={openAddModal}>
-              <Text style={styles.addBtnText}>+</Text>
-            </Pressable>
+          <View style={styles.topRow}>
+            <Text style={styles.title}>MyVideos</Text>
+            <Pressable style={styles.plusBtn} onPress={() => setAddOpen(true)}><Text style={styles.plusText}>+</Text></Pressable>
           </View>
-          <Text style={styles.sectionTitle}>Lists</Text>
+          <Text style={styles.subtitle}>Lists</Text>
 
           <FlatList
             data={folders}
             keyExtractor={(item) => item.id}
             contentContainerStyle={styles.folderList}
-            renderItem={renderFolderCard}
-            ListEmptyComponent={<Text style={styles.emptyText}>THE LIST IS EMPTY. ADD YOUR FIRST VIDEO.</Text>}
+            renderItem={({ item }) => (
+              <Pressable style={styles.folderRow} onPress={() => setActiveFolderId(item.id)}>
+                <Image source={{ uri: item.cover }} style={styles.folderIcon} />
+                <View style={{ flex: 1 }}>
+                  <Text style={styles.folderName}>{item.name}</Text>
+                  <Text style={styles.folderCount}>{toCount(item.videos.length)}</Text>
+                </View>
+                <Pressable onPress={() => deleteFolder(item.id)} style={styles.deleteSmall}><Text style={styles.deleteSmallText}>✕</Text></Pressable>
+              </Pressable>
+            )}
+            ListEmptyComponent={<Text style={styles.empty}>THE LIST IS EMPTY{`\n`}ADD YOUR FIRST VIDEO</Text>}
           />
         </>
       ) : (
         <>
-          <View style={styles.headerRow}>
-            <Pressable onPress={() => setSelectedFolderId(null)}>
-              <Text style={styles.backBtn}>‹ Lists</Text>
-            </Pressable>
-            <Pressable style={styles.addBtn} onPress={openAddModal}>
-              <Text style={styles.addBtnText}>+</Text>
-            </Pressable>
+          <View style={styles.topRow}>
+            <Pressable onPress={() => setActiveFolderId(null)}><Text style={styles.back}>‹ Lists</Text></Pressable>
+            <Pressable style={styles.plusBtn} onPress={() => setAddOpen(true)}><Text style={styles.plusText}>+</Text></Pressable>
           </View>
 
-          <View style={styles.selectedBanner}>
-            <Image source={{ uri: selectedFolder.cover }} style={styles.selectedCover} />
-            <Text style={styles.selectedTitle}>{selectedFolder.name}</Text>
-            <Text style={styles.folderSub}>{folderCountLabel(selectedFolder.videos.length)}</Text>
+          <View style={styles.hero}>
+            <Image source={{ uri: activeFolder.cover }} style={styles.heroImage} />
+            <Text style={styles.heroTitle}>{activeFolder.name}</Text>
+            <Text style={styles.folderCount}>{toCount(activeFolder.videos.length)}</Text>
           </View>
 
           <FlatList
-            data={selectedFolder.videos}
+            data={activeFolder.videos}
             keyExtractor={(item) => item.id}
             contentContainerStyle={styles.videoList}
-            renderItem={renderVideoRow}
+            renderItem={({ item }) => (
+              <Pressable style={styles.videoRow} onPress={() => Linking.openURL(item.youtubeUrl)}>
+                <Image source={{ uri: item.thumbnail }} style={styles.thumb} />
+                <View style={{ flex: 1 }}>
+                  <Text style={styles.videoTitle} numberOfLines={1}>{item.title}</Text>
+                  <Text style={styles.videoMeta} numberOfLines={1}>{item.channel}</Text>
+                </View>
+                <View style={styles.actions}>
+                  <Pressable style={styles.actionBtn} onPress={() => { setVideoToMove(item.id); setMoveOpen(true); }}><Text style={styles.actionTxt}>⇄</Text></Pressable>
+                  <Pressable style={styles.actionBtn} onPress={() => deleteVideo(item.id)}><Text style={styles.actionTxt}>🗑</Text></Pressable>
+                </View>
+              </Pressable>
+            )}
           />
         </>
       )}
 
-      <Modal visible={isAddModalVisible} transparent animationType="fade" onRequestClose={() => setIsAddModalVisible(false)}>
-        <View style={styles.modalBackdrop}>
-          <View style={styles.modalCard}>
+      <Modal visible={addOpen} transparent animationType="fade" onRequestClose={() => setAddOpen(false)}>
+        <View style={styles.overlay}>
+          <View style={styles.modal}>
             <Text style={styles.modalTitle}>Paste the URL and choose the list</Text>
-            <TextInput
-              placeholder="https://youtu.be/..."
-              placeholderTextColor="#aaa"
-              value={urlInput}
-              onChangeText={setUrlInput}
-              style={styles.input}
-              autoCapitalize="none"
-            />
-            <TextInput
-              placeholder="Create new List"
-              placeholderTextColor="#ddd"
-              value={newFolderInput}
-              onChangeText={setNewFolderInput}
-              style={styles.input}
-            />
-            <Pressable onPress={createFolder} style={styles.createListBtn}>
-              <Text style={styles.createListText}>Create list</Text>
-            </Pressable>
-
+            <TextInput style={styles.input} placeholder="https://youtu.be/....." placeholderTextColor="#d0d0d0" value={urlInput} onChangeText={setUrlInput} autoCapitalize="none" />
+            <TextInput style={styles.inputLight} placeholder="Create new List" placeholderTextColor="#4f4f4f" value={newFolderInput} onChangeText={setNewFolderInput} />
+            <Pressable style={styles.createBtn} onPress={createFolder}><Text style={styles.createText}>Create</Text></Pressable>
             <FlatList
               data={folders}
               keyExtractor={(item) => item.id}
-              renderItem={({ item }) => (
-                <Pressable style={styles.folderPick} onPress={() => addVideoToFolder(item.id)}>
-                  <Text style={styles.folderPickText}>{item.name}</Text>
-                </Pressable>
-              )}
+              renderItem={({ item }) => <Pressable style={styles.pick} onPress={() => addVideo(item.id)}><Text style={styles.pickText}>{item.name}</Text></Pressable>}
             />
           </View>
         </View>
       </Modal>
 
-      <Modal visible={isMoveModalVisible} transparent animationType="slide" onRequestClose={() => setIsMoveModalVisible(false)}>
-        <View style={styles.modalBackdrop}>
-          <View style={styles.modalCard}>
+      <Modal visible={moveOpen} transparent animationType="slide" onRequestClose={() => setMoveOpen(false)}>
+        <View style={styles.overlay}>
+          <View style={styles.modal}>
             <Text style={styles.modalTitle}>Move video to</Text>
-            {folders
-              .filter((folder) => folder.id !== selectedFolderId)
-              .map((folder) => (
-                <Pressable key={folder.id} style={styles.folderPick} onPress={() => moveVideo(folder.id)}>
-                  <Text style={styles.folderPickText}>{folder.name}</Text>
-                </Pressable>
-              ))}
+            {folders.filter((f) => f.id !== activeFolderId).map((f) => (
+              <Pressable key={f.id} style={styles.pick} onPress={() => moveVideo(f.id)}><Text style={styles.pickText}>{f.name}</Text></Pressable>
+            ))}
           </View>
         </View>
       </Modal>
@@ -293,39 +231,38 @@ export default function App() {
 
 const styles = StyleSheet.create({
   container: { flex: 1, backgroundColor: '#030303', paddingHorizontal: 16 },
-  headerRow: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginTop: 18 },
-  header: { color: '#8d16e6', fontSize: 42, fontWeight: '700' },
-  addBtn: { backgroundColor: '#7410d8', width: 40, height: 40, borderRadius: 20, alignItems: 'center', justifyContent: 'center' },
-  addBtnText: { color: '#fff', fontSize: 28, fontWeight: '700' },
-  sectionTitle: { color: '#ddd', fontSize: 30, fontWeight: '700', marginVertical: 10 },
-  folderList: { paddingBottom: 20, gap: 14 },
-  folderCard: { backgroundColor: '#2f2f35', borderRadius: 20, padding: 10, alignItems: 'center', flexDirection: 'row', borderWidth: 1, borderColor: '#494949' },
-  folderCover: { width: 56, height: 56, borderRadius: 12, marginRight: 12 },
-  folderTextWrap: { flex: 1 },
-  folderTitle: { color: '#fff', fontSize: 28, fontWeight: '700' },
-  folderSub: { color: '#bcbcbc', fontSize: 16 },
-  smallIconBtn: { padding: 8 },
-  smallIconText: { color: '#ddd', fontSize: 16 },
-  emptyText: { color: '#666', textAlign: 'center', marginTop: 70, fontSize: 22, fontWeight: '700' },
-  backBtn: { color: '#ddd', fontSize: 22, fontWeight: '600' },
-  selectedBanner: { alignItems: 'center', backgroundColor: '#3f3f45', borderRadius: 20, padding: 14, marginVertical: 14 },
-  selectedCover: { width: 110, height: 110, borderRadius: 10, marginBottom: 8 },
-  selectedTitle: { color: '#8d16e6', fontSize: 32, fontWeight: '700' },
-  videoList: { gap: 10, paddingBottom: 30 },
-  videoRow: { backgroundColor: '#585858', borderRadius: 14, padding: 8, flexDirection: 'row', alignItems: 'center' },
-  videoThumb: { width: 72, height: 56, borderRadius: 6, marginRight: 10 },
-  videoTextWrap: { flex: 1 },
-  videoTitle: { color: '#fff', fontSize: 15, fontWeight: '600' },
-  videoSub: { color: '#c6c6c6' },
-  videoActions: { flexDirection: 'row', gap: 8 },
-  actionBtn: { backgroundColor: '#2a2a2a', borderRadius: 8, paddingHorizontal: 10, paddingVertical: 8 },
-  actionText: { color: '#fff', fontSize: 14 },
-  modalBackdrop: { flex: 1, backgroundColor: 'rgba(0,0,0,0.6)', justifyContent: 'center', padding: 22 },
-  modalCard: { backgroundColor: '#6a6a6a', borderRadius: 24, padding: 18, maxHeight: '80%' },
-  modalTitle: { color: '#fff', fontSize: 22, fontWeight: '700', marginBottom: 12 },
-  input: { backgroundColor: '#2f2f2f', color: '#fff', borderRadius: 16, paddingHorizontal: 14, paddingVertical: 12, marginBottom: 10 },
-  createListBtn: { alignSelf: 'flex-start', backgroundColor: '#7410d8', borderRadius: 16, paddingHorizontal: 12, paddingVertical: 8, marginBottom: 10 },
-  createListText: { color: '#fff', fontWeight: '700' },
-  folderPick: { backgroundColor: '#ddd', borderRadius: 20, paddingVertical: 10, paddingHorizontal: 14, marginBottom: 8 },
-  folderPickText: { color: '#171717', fontSize: 18, fontWeight: '700' },
+  topRow: { marginTop: 14, flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center' },
+  title: { color: '#8d16e6', fontSize: 44, fontWeight: '700' },
+  plusBtn: { width: 42, height: 42, borderRadius: 21, backgroundColor: '#7714da', alignItems: 'center', justifyContent: 'center' },
+  plusText: { color: '#fff', fontSize: 30, fontWeight: '800' },
+  subtitle: { color: '#ddd', fontSize: 33, fontWeight: '700', marginVertical: 10 },
+  folderList: { gap: 12, paddingBottom: 20 },
+  folderRow: { backgroundColor: '#2f2f35', borderColor: '#545454', borderWidth: 1, borderRadius: 22, padding: 10, flexDirection: 'row', alignItems: 'center' },
+  folderIcon: { width: 56, height: 56, borderRadius: 12, marginRight: 10 },
+  folderName: { color: '#fff', fontSize: 33, fontWeight: '700' },
+  folderCount: { color: '#c5c5c5', fontSize: 17 },
+  deleteSmall: { padding: 6 },
+  deleteSmallText: { color: '#fff' },
+  empty: { color: '#3f3f3f', textAlign: 'center', fontSize: 33, fontWeight: '700', marginTop: 90 },
+  back: { color: '#f0f0f0', fontSize: 24, fontWeight: '600' },
+  hero: { borderRadius: 18, backgroundColor: '#3f3f45', alignItems: 'center', padding: 10, marginVertical: 12 },
+  heroImage: { width: 102, height: 102, borderRadius: 8, marginBottom: 8 },
+  heroTitle: { color: '#8d16e6', fontSize: 30, fontWeight: '700' },
+  videoList: { gap: 8, paddingBottom: 20 },
+  videoRow: { borderRadius: 14, backgroundColor: '#636363', padding: 8, flexDirection: 'row', alignItems: 'center' },
+  thumb: { width: 73, height: 56, borderRadius: 6, marginRight: 8 },
+  videoTitle: { color: '#fff', fontWeight: '600', fontSize: 15 },
+  videoMeta: { color: '#e5e5e5', fontSize: 12 },
+  actions: { flexDirection: 'row', gap: 6 },
+  actionBtn: { backgroundColor: '#2f2f2f', borderRadius: 8, paddingHorizontal: 9, paddingVertical: 7 },
+  actionTxt: { color: '#fff' },
+  overlay: { flex: 1, backgroundColor: 'rgba(0,0,0,0.55)', justifyContent: 'center', padding: 22 },
+  modal: { backgroundColor: '#686868', borderRadius: 26, padding: 14, maxHeight: '80%' },
+  modalTitle: { color: '#fff', fontSize: 26, fontWeight: '700', marginBottom: 8 },
+  input: { backgroundColor: '#5b5b5b', borderRadius: 18, color: '#fff', paddingHorizontal: 12, paddingVertical: 11, marginBottom: 8 },
+  inputLight: { backgroundColor: '#f1f1f1', borderRadius: 18, color: '#1a1a1a', paddingHorizontal: 12, paddingVertical: 11, marginBottom: 8 },
+  createBtn: { alignSelf: 'flex-end', backgroundColor: '#7714da', borderRadius: 14, paddingHorizontal: 14, paddingVertical: 8, marginBottom: 8 },
+  createText: { color: '#fff', fontWeight: '700' },
+  pick: { backgroundColor: '#ebebeb', borderRadius: 18, paddingVertical: 10, paddingHorizontal: 12, marginBottom: 8 },
+  pickText: { fontSize: 34, color: '#222', fontWeight: '700' },
 });
