@@ -11,9 +11,53 @@ import {
   TextInput,
   View,
 } from 'react-native';
-import { useMemo, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 
 const YOUTUBE_REGEX = /^(https?:\/\/)?(www\.)?(youtube\.com|youtu\.be)\/.+/i;
+
+
+const STORAGE_KEY = 'myvideos_lists_v1';
+const DEFAULT_LISTS = [{ id: 'fav', name: 'Favorites', videos: [] }];
+
+let asyncStorageModule = null;
+
+function getAsyncStorage() {
+  if (asyncStorageModule !== null) return asyncStorageModule;
+  try {
+    asyncStorageModule = require('@react-native-async-storage/async-storage').default;
+  } catch {
+    asyncStorageModule = undefined;
+  }
+  return asyncStorageModule;
+}
+
+async function readListsFromStorage() {
+  const AsyncStorage = getAsyncStorage();
+  if (AsyncStorage) {
+    const raw = await AsyncStorage.getItem(STORAGE_KEY);
+    return raw ? JSON.parse(raw) : null;
+  }
+
+  if (typeof globalThis.localStorage !== 'undefined') {
+    const raw = globalThis.localStorage.getItem(STORAGE_KEY);
+    return raw ? JSON.parse(raw) : null;
+  }
+
+  return null;
+}
+
+async function writeListsToStorage(lists) {
+  const serialized = JSON.stringify(lists);
+  const AsyncStorage = getAsyncStorage();
+  if (AsyncStorage) {
+    await AsyncStorage.setItem(STORAGE_KEY, serialized);
+    return;
+  }
+
+  if (typeof globalThis.localStorage !== 'undefined') {
+    globalThis.localStorage.setItem(STORAGE_KEY, serialized);
+  }
+}
 
 function extractYoutubeId(url) {
   try {
@@ -32,12 +76,48 @@ function extractYoutubeId(url) {
 }
 
 export default function App() {
-  const [lists, setLists] = useState([
-    { id: 'fav', name: 'Favorites', videos: [] },
-  ]);
+  const [lists, setLists] = useState(DEFAULT_LISTS);
   const [showAddModal, setShowAddModal] = useState(false);
+  const [isReady, setIsReady] = useState(false);
   const [urlInput, setUrlInput] = useState('');
   const [newListInput, setNewListInput] = useState('');
+
+  useEffect(() => {
+    let isMounted = true;
+
+    const loadSavedLists = async () => {
+      try {
+        const savedLists = await readListsFromStorage();
+        if (isMounted && savedLists && Array.isArray(savedLists)) {
+          setLists(savedLists);
+        }
+      } catch {
+        Alert.alert('Storage error', 'Could not load your saved folders.');
+      } finally {
+        if (isMounted) setIsReady(true);
+      }
+    };
+
+    loadSavedLists();
+
+    return () => {
+      isMounted = false;
+    };
+  }, []);
+
+  useEffect(() => {
+    if (!isReady) return;
+
+    const persistLists = async () => {
+      try {
+        await writeListsToStorage(lists);
+      } catch {
+        Alert.alert('Storage error', 'Could not save your folders.');
+      }
+    };
+
+    persistLists();
+  }, [lists, isReady]);
 
   const totalVideos = useMemo(
     () => lists.reduce((acc, list) => acc + list.videos.length, 0),
